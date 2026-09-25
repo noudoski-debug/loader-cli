@@ -3,11 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Threading;
-
-#if NET
-// на .NET (Core) ZipFile/ZipArchiveExtensionMethods вынесены в отдельную сборку
-using System.IO.Compression;
-#endif
+using System.IO.Compression; // ZipFile + ExtractToFile (System.IO.Compression.FileSystem.dll подключён в csproj)
 
 namespace Loader
 {
