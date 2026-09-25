@@ -50,14 +50,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Include="MainForm.cs" />
+    <Compile Include="CliCore.cs" />
     <Compile Include="Models.cs" />
     <Compile Include="Json.cs" />
     <Compile Include="Downloader.cs" />
     <Compile Include="FabricApi.cs" />
     <Compile Include="VanillaApi.cs" />
     <Compile Include="LauncherConfig.cs" />
-    <Compile Include="CliCore.cs" />
     <Compile Include="CliProgram.cs" />
   </ItemGroup>
 

@@ -60,23 +60,50 @@ namespace Loader
             Downloader.DownloadFile(url, dest, null, default(System.Threading.CancellationToken));
         }
 
+        /// <summary>Последняя версия fabric-installer с maven (список версий из maven-metadata.xml).</summary>
+        public static string GetInstallerVersion()
+        {
+            try
+            {
+                string xml = Downloader.ReadAllText(MavenBase + "net/fabricmc/fabric-installer/maven-metadata.xml",
+                    default(System.Threading.CancellationToken));
+                // берём последний тег <version>x.y.z</version>
+                string best = null;
+                int pos = 0;
+                while (true)
+                {
+                    int a = xml.IndexOf("<version>", pos, StringComparison.Ordinal);
+                    if (a < 0) break;
+                    int b = xml.IndexOf("</version>", a, StringComparison.Ordinal);
+                    if (b < 0) break;
+                    string v = xml.Substring(a + 9, b - a - 9).Trim();
+                    if (v.Length > 0 && v[0] >= '0' && v[0] <= '9') best = v;
+                    pos = b;
+                }
+                if (!string.IsNullOrEmpty(best)) return best;
+            }
+            catch { }
+            return "1.1.2"; // заведомо существующая версия на случай недоступного maven
+        }
+
         /// <summary>
-        /// Скачивает официальный установщик Fabric Loader и запускает его с --dir &lt;.minecraft&gt;,
-        /// чтобы он сам поставил vanilla-профиль версии + все библиотеки Mojang.
+        /// Скачивает официальный установщик Fabric Loader и запускает его в тихом режиме
+        /// (--dir &lt;.minecraft&gt;), чтобы он сам поставил vanilla-профиль версии + все библиотеки Mojang.
         /// Возвращает true, если установка прошла успешно.
         /// </summary>
-        public static bool RunOfficialInstaller(string gameVersion, string mcDir, Action<string> log, System.Windows.Forms.Control uiThread)
+        public static bool RunOfficialInstaller(string gameVersion, string mcDir, Action<string> log)
         {
             try
             {
                 string loaderVersion = GetLatestLoader(gameVersion);
-                string installerUrl = MavenBase + "net/fabricmc/fabric-installer/" + loaderVersion +
-                                      "/fabric-installer-" + loaderVersion + ".jar";
-                string jarPath = Path.Combine(Path.GetTempPath(), "fabric-installer-" + loaderVersion + ".jar");
+                string installerVersion = GetInstallerVersion();
+                string installerUrl = MavenBase + "net/fabricmc/fabric-installer/" + installerVersion +
+                                      "/fabric-installer-" + installerVersion + ".jar";
+                string jarPath = Path.Combine(Path.GetTempPath(), "fabric-installer-" + installerVersion + ".jar");
 
                 if (!File.Exists(jarPath))
                 {
-                    log("  [Fabric] скачиваю официальный установщик " + loaderVersion + "...");
+                    log("  [Fabric] скачиваю официальный установщик " + installerVersion + "...");
                     Downloader.DownloadFile(installerUrl, jarPath, null, default(System.Threading.CancellationToken));
                 }
 
@@ -87,15 +114,27 @@ namespace Loader
                     return false;
                 }
 
-                log("  [Fabric] запускаю установщик для " + gameVersion + " (появится окно)...");
+                log("  [Fabric] запускаю установщик для " + gameVersion + " (тихий режим)...");
                 var psi = new System.Diagnostics.ProcessStartInfo(java)
                 {
                     UseShellExecute = false,
-                    Arguments = "-jar \"" + jarPath + "\" install -dir \"" + mcDir + "\" -gameVersion " + gameVersion + " -loader " + loaderVersion,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                    Arguments = "-jar \"" + jarPath + "\" install --dir \"" + mcDir +
+                                "\" --download MINECRAFT --game " + gameVersion +
+                                " --loader " + loaderVersion + " --side client --silent",
                 };
                 using (var p = System.Diagnostics.Process.Start(psi))
                 {
+                    string stdout = p.StandardOutput.ReadToEnd();
+                    string stderr = p.StandardError.ReadToEnd();
                     p.WaitForExit();
+                    foreach (var line in (stdout + "\n" + stderr).Split('\n'))
+                    {
+                        string t = line.Trim();
+                        if (t.Length > 0) log("      | " + t);
+                    }
                     if (p.ExitCode == 0)
                     {
                         log("  [Fabric] официальная установка завершена успешно.");
@@ -204,7 +243,7 @@ namespace Loader
             }
 
             // 2) Пробуем официальный установщик Fabric — он ставит всё сам корректно
-            if (RunOfficialInstaller(gameVersion, mcDir, log, null))
+            if (RunOfficialInstaller(gameVersion, mcDir, log))
             {
                 string installedProfile = FindInstalledFabricProfile(mcDir, gameVersion);
                 if (!string.IsNullOrEmpty(installedProfile)) return installedProfile;

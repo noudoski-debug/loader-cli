@@ -7,6 +7,42 @@ namespace Loader
     /// <summary>Чтение/запись launcher.json и state.json (через собственный Json-парсер).</summary>
     public static class LauncherConfig
     {
+        // =====================================================================
+        //  ССЫЛКА НА launcher.json НА GITHUB — ПРОПИШИ СВОЮ ЗДЕСЬ (вариант 1):
+        //  Поддерживаются и web-, и raw-ссылки:
+        //    https://github.com/USER/REPO/blob/main/launcher.json
+        //    https://raw.githubusercontent.com/USER/REPO/main/launcher.json
+        //  Если оставить пустым "" — вариант 2: ссылка кладётся в файл manifest.txt
+        //  рядом с LoaderCLI.exe. Если и там пусто — локальный launcher.json.
+        // =====================================================================
+        public const string RemoteManifestUrl = "";
+
+        // шаблон для «затирания» (config\launcher.template.json), если удалённый json недоступен
+        public const string DefaultJson = @"{
+  ""minecraftDir"": """",
+  ""javaPath"": """",
+  ""jvmArgs"": [ ""-Xmx4G"" ],
+  ""packs"": [
+    {
+      ""name"": ""ExampleModpack"",
+      ""url"": ""https://example.com/files/example-modpack.zip"",
+      ""version"": ""1.21.4"",
+      ""useFabric"": true
+    },
+    {
+      ""name"": ""OldSchool"",
+      ""url"": ""https://example.com/files/oldschool-1.16.5.zip"",
+      ""version"": ""1.16.5"",
+      ""useFabric"": true
+    },
+    {
+      ""name"": ""Готовый установщик (exe)"",
+      ""url"": ""https://example.com/files/setup.exe"",
+      ""version"": ""1.21.11"",
+      ""useFabric"": false
+    }
+  ]
+}";
         public static LauncherManifest Load(string path)
         {
             var m = new LauncherManifest();
@@ -42,6 +78,37 @@ namespace Loader
             File.WriteAllText(path, DefaultJson);
         }
 
+        /// <summary>
+        /// Определяет ссылку на удалённый launcher.json:
+        /// 1) const RemoteManifestUrl (прописана прямо в коде);
+        /// 2) файл manifest.txt рядом с LoaderCLI.exe (одна строка — ссылка).
+        /// Пустая строка = локальный режим.
+        /// </summary>
+        public static string ResolveRemoteUrl(string baseDir)
+        {
+            if (!string.IsNullOrWhiteSpace(RemoteManifestUrl)) return RemoteManifestUrl.Trim();
+            try
+            {
+                string f = Path.Combine(baseDir, "manifest.txt");
+                if (File.Exists(f))
+                {
+                    foreach (var line in File.ReadAllLines(f))
+                    {
+                        string t = (line ?? "").Trim();
+                        if (t.Length > 0 && !t.StartsWith("#")) return t;
+                    }
+                }
+            }
+            catch { }
+            return "";
+        }
+
+        /// <summary>Положить шаблон json поверх локального launcher.json (когда удалённый недоступен).</summary>
+        public static void OverwriteWithTemplate(string path)
+        {
+            File.WriteAllText(path, DefaultJson);
+        }
+
         public static LoaderState LoadState(string path)
         {
             var s = new LoaderState();
@@ -66,30 +133,5 @@ namespace Loader
             File.WriteAllText(path, Json.Write(d));
         }
 
-        private const string DefaultJson = @"{
-  ""minecraftDir"": """",
-  ""javaPath"": """",
-  ""jvmArgs"": [ ""-Xmx4G"" ],
-  ""packs"": [
-    {
-      ""name"": ""ExampleModpack"",
-      ""url"": ""https://example.com/files/example-modpack.zip"",
-      ""version"": ""1.21.4"",
-      ""useFabric"": true
-    },
-    {
-      ""name"": ""OldSchool"",
-      ""url"": ""https://example.com/files/oldschool-1.16.5.zip"",
-      ""version"": ""1.16.5"",
-      ""useFabric"": true
-    },
-    {
-      ""name"": ""Готовый установщик (exe)"",
-      ""url"": ""https://example.com/files/setup.exe"",
-      ""version"": ""1.21.11"",
-      ""useFabric"": false
-    }
-  ]
-}";
     }
 }
