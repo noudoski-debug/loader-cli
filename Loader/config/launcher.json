@@ -1,0 +1,25 @@
+{
+  "minecraftDir": "",
+  "javaPath": "",
+  "jvmArgs": [ "-Xmx4G" ],
+  "packs": [
+    {
+      "name": "My Modpack 1.21.4",
+      "url": "https://example.com/files/my-modpack-1.21.4.zip",
+      "version": "1.21.4",
+      "useFabric": true
+    },
+    {
+      "name": "OldSchool 1.16.5",
+      "url": "https://example.com/files/oldschool-1.16.5.zip",
+      "version": "1.16.5",
+      "useFabric": true
+    },
+    {
+      "name": "Готовый установщик (exe)",
+      "url": "https://example.com/files/setup.exe",
+      "version": "1.21.11",
+      "useFabric": false
+    }
+  ]
+}
