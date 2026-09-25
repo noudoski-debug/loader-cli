@@ -1,0 +1,2 @@
+# сюда одной строкой — ссылка на launcher.json в GitHub (web или raw):
+# https://raw.githubusercontent.com/USER/REPO/main/launcher.json

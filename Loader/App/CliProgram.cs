@@ -1,41 +1,94 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 
 namespace Loader
 {
     /// <summary>
-    /// Точка входа консольного лоадера (LoaderCLI.exe).
+    /// LoaderCLI — консольный лоадер (только CMD, без окон и выбора).
     ///
-    /// Примеры:
-    ///   LoaderCLI list  https://raw.githubusercontent.com/USER/REPO/main/launcher.json
-    ///   LoaderCLI install 2                 (установить сборку №2 из последнего манифеста)
-    ///   LoaderCLI play  "My Modpack 1.21.4" (запустить оффлайн, без авторизации)
-    ///   LoaderCLI gui                       (открыть обычное оконное окно)
+    /// ССЫЛКА НА launcher.json ПРОПИСЫВАЕТСЯ В КОДЕ:
+    ///   файл LauncherConfig.cs -> public const string RemoteManifestUrl = "https://...";
+    /// Либо рядом с exe кладётся manifest.txt с одной строкой-ссылкой.
+    ///
+    /// Запуск без аргументов:  LoaderCLI.exe
+    ///   1) качает launcher.json с GitHub;
+    ///   2) показывает список сборок;
+    ///   3) ждёт номер в консоли;
+    ///   4) скачивает zip/exe, распаковывает, кладёт jar-моды в mods/,
+    ///      ставит Fabric под версию из json (1.21.4 / 1.21.11 / 1.16.5 ...);
+    ///   5) сам запускает Minecraft (оффлайн, без авторизации).
     /// </summary>
     internal static class CliProgram
     {
         private static string BaseDir;
-        private static string StatePath;
-        private static Engine _engine;
+        private static Engine _engine;   // кэш скачанного манифеста (не перезагружать при оффлайне)
 
         [STAThread]
         private static int Main(string[] args)
         {
             try { Console.OutputEncoding = System.Text.Encoding.UTF8; } catch { }
             Downloader.InitTls();
-
             BaseDir = AppDomain.CurrentDomain.BaseDirectory;
-            StatePath = Path.Combine(BaseDir, "state.json");
 
-            if (args == null || args.Length == 0 || IsHelp(args[0]))
+            if (args != null && args.Length > 0)
+                return RunCommands(args);
+
+            // ================= ГЛАВНЫЙ ЦИКЛ (без аргументов) =================
+            PrintBanner();
+            while (true)
             {
-                PrintHelp();
-                return args == null || args.Length == 0 ? 1 : 0;
-            }
+                var e = RefreshManifest();
+                Console.WriteLine();
+                Console.WriteLine("№   Название                             Версия   Тип  Статус");
+                Console.WriteLine(new string('-', 78));
+                for (int i = 0; i < e.Manifest.Packs.Count; i++)
+                {
+                    var p = e.Manifest.Packs[i];
+                    Console.WriteLine(
+                        Pad((i + 1).ToString(), 4) +
+                        Pad(p.Name, 37) +
+                        Pad(p.Version, 9) +
+                        Pad(Engine.GuessType(p.Url), 5) +
+                        e.PackStatus(p));
+                }
+                Console.WriteLine();
+                Console.WriteLine("введи № сборки — лоадер скачает её и сам запустит игру.");
+                Console.WriteLine("(Enter — обновить список, q — выход)");
+                Console.Write("> ");
 
-            string cmd = args[0].ToLowerInvariant();
+                string line;
+                try { line = Console.ReadLine(); } catch { return 0; }
+                if (line == null) return 0;
+                line = line.Trim();
+                if (line.ToLowerInvariant() == "q" || line.ToLowerInvariant() == "exit") return 0;
+                if (line.Length == 0) continue;
+
+                var pack = PickPack(e, line);
+                if (pack == null) continue;
+
+                try
+                {
+                    e.InstallPack(pack);          // скачал zip/exe -> распаковал -> модам место -> Fabric под версию
+                    if (Engine.GuessType(pack.Url) == "EXE")
+                    {
+                        Log("* установщик .exe уже запущен — дальше сам.");
+                    }
+                    else
+                    {
+                        e.LaunchGame(pack);       // запустил Minecraft оффлайн, без авторизации
+                    }
+                }
+                catch (Exception ex) { Err(ex.Message); }
+                Console.WriteLine();
+            }
+        }
+
+        // ============================ РЕЖИМ АРГУМЕНТОВ ============================
+
+        private static int RunCommands(string[] args)
+        {
+            string cmd = (args[0] ?? "").ToLowerInvariant();
             var rest = new List<string>();
             for (int i = 1; i < args.Length; i++) rest.Add(args[i]);
 
@@ -43,237 +96,156 @@ namespace Loader
             {
                 switch (cmd)
                 {
-                    case "gui":
-                        System.Windows.Forms.Application.EnableVisualStyles();
-                        System.Windows.Forms.Application.SetCompatibleTextRenderingDefault(false);
-                        System.Windows.Forms.Application.Run(new MainForm(rest.ToArray()));
+                    case "list":
+                        PrintList(RefreshManifest());
                         return 0;
 
-                    case "list":     return CmdList(rest);
-                    case "install":  return CmdInstall(rest);
-                    case "play":     return CmdPlay(rest);
-                    case "run":      return CmdRun(rest);
-                    case "vanilla":  return CmdVanilla(rest);
-                    case "folder":   return CmdFolder(rest);
+                    case "install":
+                    case "run":
+                    {
+                        var e = RefreshManifest();
+                        string sel = rest.Count > 0 ? string.Join(" ", rest.ToArray()) : Ask("название или № сборки:");
+                        var packs = PickPacks(e, sel);
+                        if (packs.Count == 0) return 2;
+                        foreach (var p in packs)
+                        {
+                            e.InstallPack(p);
+                            if (cmd == "run" && Engine.GuessType(p.Url) != "EXE")
+                                e.LaunchGame(p);
+                        }
+                        if (cmd == "install")
+                            Console.WriteLine("установлено. запуск:  LoaderCLI run <№|название>  (или просто LoaderCLI.exe)");
+                        return 0;
+                    }
+
+                    case "play":
+                    {
+                        var e = RefreshManifest();
+                        string sel = rest.Count > 0 ? string.Join(" ", rest.ToArray()) : Ask("название или № сборки:");
+                        var packs = PickPacks(e, sel);
+                        if (packs.Count == 0) return 2;
+                        e.LaunchGame(packs[0]);
+                        return 0;
+                    }
+
                     default:
                         Err("неизвестная команда: " + cmd);
                         PrintHelp();
                         return 2;
                 }
             }
-            catch (Exception ex)
-            {
-                Err(ex.Message);
-                return 1;
-            }
+            catch (Exception ex) { Err(ex.Message); return 1; }
         }
 
-        private static bool IsHelp(string s)
+        // ============================ МАНИФЕСТ ============================
+
+        /// <summary>
+        /// Кидает launcher.json с GitHub (ссылка из кода / manifest.txt).
+        /// Если сети нет — берёт последнюю скачанную копию, потом локальный launcher.json.
+        /// </summary>
+        private static Engine RefreshManifest()
         {
-            return s == "/?" || s == "-h" || s == "--help" || s == "help";
-        }
-
-        // ============================ КОМАНДЫ ============================
-
-        private static int CmdList(List<string> rest)
-        {
-            var e = GetEngine(rest);
-            Console.WriteLine();
-            Console.WriteLine("манифест: " + e.SourceName);
-            Console.WriteLine("№   Название                         Версия    Fabric Тип  Статус");
-            Console.WriteLine(new string('-', 92));
-            for (int i = 0; i < e.Manifest.Packs.Count; i++)
-            {
-                var p = e.Manifest.Packs[i];
-                Console.WriteLine(
-                    Pad((i + 1).ToString(), 4) +
-                    Pad(p.Name, 33) +
-                    Pad(p.Version, 10) +
-                    Pad(p.UseFabric ? "да" : "нет", 7) +
-                    Pad(Engine.GuessType(p.Url), 5) +
-                    e.PackStatus(p));
-            }
-            Console.WriteLine();
-            Console.WriteLine("установка:  LoaderCLI install <№|название> [--url <ссылка на json>]");
-            return 0;
-        }
-
-        private static int CmdInstall(List<string> rest)
-        {
-            string url = PopUrl(rest);
-            var e = GetEngine(rest, url);
-
-            // «install *» — поставить все сборки из манифеста
-            if (rest.Count > 0 && (rest[0] == "*" || rest[0].Equals("all", StringComparison.OrdinalIgnoreCase)))
-            {
-                foreach (var p in e.Manifest.Packs) e.InstallPack(p);
-                SaveRemote(url != null ? url : e.SourceName);
-                return 0;
-            }
-
-            var pack = PickPack(e, rest);
-            if (pack == null) return 2;
-            e.InstallPack(pack);
-            SaveRemote(url != null ? url : e.SourceName);
-            return 0;
-        }
-
-        private static int CmdPlay(List<string> rest)
-        {
-            string url = PopUrl(rest);
-            var e = GetEngine(rest, url);
-            var pack = PickPack(e, rest);
-            if (pack == null) return 2;
-            e.LaunchGame(pack);
-            return 0;
-        }
-
-        /// <summary>install + play одной командой.</summary>
-        private static int CmdRun(List<string> rest)
-        {
-            int r = CmdInstall(rest);
-            if (r != 0) return r;
-            // rest уже пуст (PickPack его выпотрошил) — читаем тот же манифест заново
-            var e = EnsureEngine(null);
-            var sb = new List<string>();
-            Console.Write("название/№ сборки для запуска: ");
-            string sel = Console.ReadLine();
-            if (!string.IsNullOrWhiteSpace(sel)) sb.Add(sel.Trim());
-            var pack = PickPack(e, sb);
-            if (pack == null) return 2;
-            e.LaunchGame(pack);
-            return 0;
-        }
-
-        private static int CmdVanilla(List<string> rest)
-        {
-            var e = EnsureEngine(null);
-            string version = rest.Count > 0 ? rest[0] : Ask("версия Minecraft (1.21.4 / 1.21.11 / 1.16.5):");
-            if (string.IsNullOrWhiteSpace(version)) return 2;
-            VanillaApi.EnsureVanilla(e.MinecraftDir(), version.Trim(), Log);
-            Console.WriteLine("готово: vanilla " + version + " в " + e.MinecraftDir());
-            return 0;
-        }
-
-        private static int CmdFolder(List<string> rest)
-        {
-            var e = EnsureEngine(null);
-            Directory.CreateDirectory(e.DownloadsDir);
-            try { Process.Start("explorer.exe", e.DownloadsDir); } catch { }
-            Console.WriteLine(e.DownloadsDir);
-            return 0;
-        }
-
-        // ============================ ХЕЛПЕРЫ ============================
-
-        private static Engine GetEngine(List<string> rest, string forcedUrl = null)
-        {
-            string url = forcedUrl;
-            // если первым аргументом идёт ссылка — используем её как источник манифеста
-            if (url == null && rest.Count > 0 && Engine.IsUrl(rest[0]))
-            {
-                url = rest[0];
-                rest.RemoveAt(0);
-            }
-            var e = EnsureEngine(url);
-            if (url != null) SaveRemote(url);
-            return e;
-        }
-
-        private static Engine EnsureEngine(string url)
-        {
-            if (_engine != null && url == null) return _engine;
             var e = new Engine(BaseDir, Log);
-            if (string.IsNullOrEmpty(url))
+
+            string url = LauncherConfig.ResolveRemoteUrl(BaseDir);
+            if (!string.IsNullOrEmpty(url))
             {
-                try { e.LoadManifest(LoadRemote()); }
+                try
+                {
+                    e.LoadManifest(url);
+                    _engine = e;
+                    return e;
+                }
                 catch (Exception ex)
                 {
-                    Console.WriteLine("! удалённый манифест недоступен (" + ex.Message + "), беру локальный launcher.json");
-                    e.LoadManifest("");
+                    Err("удалённый манифест недоступен: " + ex.Message);
                 }
             }
-            else e.LoadManifest(url);
+
+            // оффлайн: свежая копия из кэша
+            if (_engine == null && File.Exists(e.CachePath))
+            {
+                try
+                {
+                    e.LoadManifest(e.CachePath);
+                    Log("* работаю по сохранённой копии манифеста (нет сети).");
+                    _engine = e;
+                    return e;
+                }
+                catch { }
+            }
+            if (_engine != null) return _engine;
+
+            // локальный launcher.json (если пустой — затираем шаблоном с примерами)
+            string local = Path.Combine(BaseDir, "launcher.json");
+            try
+            {
+                e.LoadManifest("");
+                if (e.Manifest.Packs.Count == 0)
+                {
+                    LauncherConfig.OverwriteWithTemplate(local);
+                    e.LoadManifest(local);
+                    Log("* launcher.json был пустой — записан шаблон с примерами: " + local);
+                }
+            }
+            catch (Exception ex)
+            {
+                Err("не удалось прочитать локальный launcher.json: " + ex.Message);
+                LauncherConfig.OverwriteWithTemplate(local);
+                try { e.LoadManifest(local); } catch { }
+            }
             _engine = e;
             return e;
         }
 
-        /// <summary>Выбор сборки по № или названию; если не указано — интерактивный вопрос.</summary>
-        private static PackInfo PickPack(Engine e, List<string> rest)
+        // ============================ ВЫБОР СБОРКИ ============================
+
+        private static PackInfo PickPack(Engine e, string sel)
         {
+            var list = PickPacks(e, sel);
+            return list.Count > 0 ? list[0] : null;
+        }
+
+        private static List<PackInfo> PickPacks(Engine e, string sel)
+        {
+            var result = new List<PackInfo>();
             if (e.Manifest.Packs.Count == 0)
             {
-                Err("в манифесте нет ни одной сборки (проверь секцию \"packs\" в json)");
-                return null;
+                Err("в манифесте нет ни одной сборки (секция \"packs\" в launcher.json)");
+                return result;
             }
+            sel = (sel ?? "").Trim();
+            if (sel.Length == 0) return result;
 
-            string sel = null;
-            if (rest.Count > 0)
-            {
-                sel = string.Join(" ", rest.ToArray());
-                rest.Clear();
-            }
-            if (string.IsNullOrWhiteSpace(sel))
-                sel = Ask("название или № сборки ('*' — все):");
-            if (string.IsNullOrWhiteSpace(sel)) return null;
-            sel = sel.Trim();
-
-            if (sel == "*" || sel.ToLowerInvariant() == "all")
-            {
-                Err("для запуска выбери одну сборку (№ или название)");
-                return null;
-            }
+            if (sel == "*" || sel.Equals("all", StringComparison.OrdinalIgnoreCase))
+                return new List<PackInfo>(e.Manifest.Packs);
 
             int num;
             if (int.TryParse(sel, out num) && num >= 1 && num <= e.Manifest.Packs.Count)
-                return e.Manifest.Packs[num - 1];
-
+            {
+                result.Add(e.Manifest.Packs[num - 1]);
+                return result;
+            }
             foreach (var p in e.Manifest.Packs)
-                if (string.Equals(p.Name, sel, StringComparison.OrdinalIgnoreCase))
-                    return p;
+                if (string.Equals(p.Name, sel, StringComparison.OrdinalIgnoreCase)) { result.Add(p); return result; }
             foreach (var p in e.Manifest.Packs)
-                if ((p.Name ?? "").IndexOf(sel, StringComparison.OrdinalIgnoreCase) >= 0)
-                    return p;
+                if ((p.Name ?? "").IndexOf(sel, StringComparison.OrdinalIgnoreCase) >= 0) { result.Add(p); return result; }
 
             Err("сборка не найдена: " + sel);
-            return null;
+            return result;
         }
 
-        private static string PopUrl(List<string> rest)
-        {
-            for (int i = 0; i < rest.Count - 1; i++)
-            {
-                if (rest[i] == "--url" || rest[i] == "-u")
-                {
-                    string v = rest[i + 1];
-                    rest.RemoveAt(i + 1);
-                    rest.RemoveAt(i);
-                    return v;
-                }
-            }
-            return null;
-        }
+        // ============================ МЕЛОЧЬ ============================
 
-        private static string LoadRemote()
+        private static void PrintList(Engine e)
         {
-            try
+            Console.WriteLine("манифест: " + e.SourceName);
+            for (int i = 0; i < e.Manifest.Packs.Count; i++)
             {
-                var st = LauncherConfig.LoadState(StatePath);
-                return st.ManifestUrl;
+                var p = e.Manifest.Packs[i];
+                Console.WriteLine(Pad((i + 1).ToString(), 4) + Pad(p.Name, 37) +
+                                  Pad(p.Version, 9) + Pad(Engine.GuessType(p.Url), 5) + e.PackStatus(p));
             }
-            catch { return null; }
-        }
-
-        private static void SaveRemote(string source)
-        {
-            try
-            {
-                if (!Engine.IsUrl(source)) return;
-                var st = LauncherConfig.LoadState(StatePath);
-                st.ManifestUrl = source;
-                LauncherConfig.SaveState(StatePath, st);
-            }
-            catch { }
         }
 
         private static string Ask(string question)
@@ -292,29 +264,26 @@ namespace Loader
             return s.PadRight(w);
         }
 
+        private static void PrintBanner()
+        {
+            Console.WriteLine("======================================================");
+            Console.WriteLine("  LoaderCLI — загрузчик сборок Minecraft (без авторизации)");
+            Console.WriteLine("  launcher.json качается с GitHub (ссылка в коде / manifest.txt)");
+            Console.WriteLine("======================================================");
+        }
+
         private static void PrintHelp()
         {
             Console.WriteLine();
-            Console.WriteLine("LoaderCLI — загрузчик сборок Minecraft (без авторизации)");
-            Console.WriteLine("json-манифест можно хранить на GitHub и качать по raw-ссылке.");
+            Console.WriteLine("использование:");
+            Console.WriteLine("  LoaderCLI.exe                      — список, вводишь № -> качает и запускает");
+            Console.WriteLine("  LoaderCLI.exe list                 — только список");
+            Console.WriteLine("  LoaderCLI.exe install <№|имя>      — скачать+установить ('*' = все)");
+            Console.WriteLine("  LoaderCLI.exe run <№|имя>          — установить и запустить");
+            Console.WriteLine("  LoaderCLI.exe play <№|имя>         — запустить установленное");
             Console.WriteLine();
-            Console.WriteLine("использование: LoaderCLI <команда> [аргументы]");
-            Console.WriteLine();
-            Console.WriteLine("  list [url|launcher.json]          показать список сборок из json");
-            Console.WriteLine("  install <№|название> [url]        скачать zip/exe, распаковать,");
-            Console.WriteLine("                                    положить jar-моды в mods/, поставить Fabric под версию");
-            Console.WriteLine("  play <№|название> [url]           запустить игру оффлайн (случайный ник)");
-            Console.WriteLine("  run [url]                          install + play одной командой");
-            Console.WriteLine("  vanilla <версия>                  докачать vanilla-файлы версии (Mojang API)");
-            Console.WriteLine("  folder                             открыть папку downloads");
-            Console.WriteLine("  gui [url]                          оконный режим");
-            Console.WriteLine();
-            Console.WriteLine("примеры:");
-            Console.WriteLine("  LoaderCLI list https://raw.githubusercontent.com/user/repo/main/launcher.json");
-            Console.WriteLine("  LoaderCLI install 1");
-            Console.WriteLine("  LoaderCLI play \"My Modpack 1.21.4\"");
-            Console.WriteLine();
-            Console.WriteLine("url сохраняется в state.json — дальше можно вызывать команды без ссылки.");
+            Console.WriteLine("ссылка на json задаётся в LauncherConfig.cs (RemoteManifestUrl)");
+            Console.WriteLine("или файлом manifest.txt рядом с exe.");
         }
     }
 }

@@ -31,6 +31,9 @@ namespace Loader
 
         // ============================ МАНИФЕСТ ============================
 
+        /// <summary>Последняя скачанная копия удалённого манифеста (для оффлайна).</summary>
+        public string CachePath { get { return Path.Combine(DownloadsDir, "launcher.remote.json"); } }
+
         public static bool IsUrl(string s)
         {
             if (string.IsNullOrEmpty(s)) return false;
@@ -89,7 +92,7 @@ namespace Loader
                 _log("* качаю манифест: " + url);
                 text = Downloader.ReadAllText(url, default(System.Threading.CancellationToken));
                 Directory.CreateDirectory(DownloadsDir);
-                File.WriteAllText(Path.Combine(DownloadsDir, "launcher.remote.json"), text);
+                File.WriteAllText(CachePath, text);
                 SourceName = url;
             }
             else if (File.Exists(source))
